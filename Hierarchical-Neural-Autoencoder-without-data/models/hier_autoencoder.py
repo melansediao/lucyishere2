@@ -5,8 +5,10 @@ import tensorflow as tf
 import numpy as np
 import os
 
-BasicLSTMCell = tf.nn.rnn_cell.BasicLSTMCell
 
+
+# BasicLSTMCell = tf.nn.rnn_cell.BasicLSTMCell
+BasicLSTMCell = tf.nn.rnn_cell.LSTMCell 
 
 class HierarchicalAutoencoder(object):
     def __init__(self, vocab, max_sent_len, max_doc_len, size=128, batch_size=1,
@@ -20,6 +22,7 @@ class HierarchicalAutoencoder(object):
         self.doc_steps      = max_doc_len
         self.num_samples    = num_samples
         self.checkpoint_dir = checkpoint_dir
+        print ("build_model ...")
         self.build_model()
 
     def build_model(self):
@@ -39,12 +42,16 @@ class HierarchicalAutoencoder(object):
         self.output_data = tf.placeholder(tf.int32, [self.batch_size,
                                                      self.doc_steps,
                                                      self.sent_steps])
+        print ("embedding...")
         with tf.device("/cpu:0"):
             self.embedding = tf.get_variable("embedding", [self.vocab_size, self.size])
             self.inputs = []
             for s in range(self.doc_steps):
+                print (str(s)+"/"+str(self.doc_steps))
                 self.inputs.append(tf.nn.embedding_lookup(self.embedding,
                                                           self.input_data[:,s,:]))
+
+        print ("encode_word_cell ...")
         # ENCODE
         # TODO: make this multi-layer
         self.encode_word_cell = BasicLSTMCell(self.size)
@@ -53,16 +60,21 @@ class HierarchicalAutoencoder(object):
         word_state   = self.encode_word_cell.zero_state(self.batch_size, tf.float32)
         sent_encodes = []
         sent_state   = self.encode_sent_cell.zero_state(self.batch_size, tf.float32)
+
+        print ("encode_RNN_word ...")
         with tf.variable_scope("encode_RNN_word"):
             for s in range(self.doc_steps):
                 for t in range(self.sent_steps):
+                    print ("encode_RNN_word ...",str(s)+"/"+str(self.doc_steps)+" "+str(t)+"/"+str(self.sent_steps))
                     if t > 0 or s > 0: tf.get_variable_scope().reuse_variables()
-                    (cell_output, word_state) = self.encode_word_cell(self.inputs[s][:,t,:],
-                                                                      word_state)
+                    (cell_output, word_state) = self.encode_word_cell(self.inputs[s][:,t,:], word_state)
                 sent_encodes.append(cell_output)
 
+        print ("encode_RNN_sentence ...")
         with tf.variable_scope("encode_RNN_sentence"):
             for s in range(self.doc_steps):
+                print ("encode_RNN_sentence ...",str(s)+"/"+str(self.doc_steps))
+                
                 if s > 0: tf.get_variable_scope().reuse_variables()
                 (cell_output, sent_state) = self.encode_sent_cell(sent_encodes[s],
                                                                   sent_state)
@@ -74,22 +86,35 @@ class HierarchicalAutoencoder(object):
         self.decode_sent_cell = BasicLSTMCell(self.size)
         self.decode_word_cell = BasicLSTMCell(self.size)
 
-        sent_decode  = tf.zeros((self.batch_size, self.size))
+        sent_decode  = tf.zeros((self.batch_size, self.size))  # 2,16
+
+        print ("doc_encode",doc_encode)
         sent_state   = self._build_zero_state(doc_encode)
+        print ("sent_state",sent_state)
+
+
         self.logits  = []
         word_decodes = []
 
+        print ("decode_RNN_sentence ...")
         with tf.variable_scope("decode_RNN_sentence"):
             for s in range(self.doc_steps):
+                print (str(s)+"/"+str(self.doc_steps))
                 if s > 0: tf.get_variable_scope().reuse_variables()
-                (cell_output, sent_state) = self.decode_sent_cell(sent_decode,
-                                                                  sent_state)
+                
+                print ("sent_decode",sent_decode)
+                print ("sent_state",sent_state)
+                (cell_output, sent_state) = self.decode_sent_cell(sent_decode,sent_state)
+
                 sent_decode = cell_output
 
-                word_decode = tf.zeros((self.batch_size, self.size))
+                word_decode = tf.zeros((self.batch_size, self.size)) # 2,16
                 word_state  = self._build_zero_state(sent_decode)
+
                 with tf.variable_scope("decode_RNN_word"):
                     for t in range(self.sent_steps):
+                        print ("decode_RNN_sentence ...",str(s)+"/"+str(self.doc_steps)+" "+str(t)+"/"+str(self.sent_steps))
+
                         # TODO: issue with get_variable_scope for sentence params?
                         # scope here is decode_RNN_sentence/decode_RNN_word/
                         if t > 0 or s > 0: tf.get_variable_scope().reuse_variables()
@@ -108,23 +133,26 @@ class HierarchicalAutoencoder(object):
         w = tf.get_variable("w", [self.size, self.vocab_size])
         b = tf.get_variable("b", [self.vocab_size])
 
-        def sampled_loss(inputs, labels):
+        def sampled_loss(logits, labels):
             labels = tf.reshape(labels, [-1, 1])
-            return tf.nn.sampled_softmax_loss(tf.transpose(w), b, inputs,
-                                              labels, self.num_samples,
+            return tf.nn.sampled_softmax_loss(tf.transpose(w), b,
+                                              labels, logits, self.num_samples,
                                               self.vocab_size)
 
         targets = tf.reshape(self.output_data, [self.batch_size,
                                                 self.doc_steps*self.sent_steps])
         targets = [targets[:,i] for i in range(self.doc_steps*self.sent_steps)]
         weights = [tf.ones([self.batch_size]) for _ in range(self.doc_steps*self.sent_steps)]
-        loss    = tf.nn.seq2seq.sequence_loss_by_example(word_decodes, targets, weights,
+        # loss    = tf.nn.seq2seq.sequence_loss_by_example(word_decodes, targets, weights,
+        #                                                  softmax_loss_function=sampled_loss)
+
+        loss    = tf.contrib.legacy_seq2seq.sequence_loss_by_example(word_decodes, targets, weights,
                                                          softmax_loss_function=sampled_loss)
 
         self.cost  = tf.reduce_sum(loss)/self.batch_size
         self.optim = tf.train.GradientDescentOptimizer(0.01).minimize(self.cost,
                 aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
-        tf.scalar_summary("cost", self.cost)
+        tf.contrib.deprecated.scalar_summary("cost", self.cost)
 
         #self.lr   = tf.Variable(0.0, trainable=False)
         #tvars     = tf.trainable_variables()
@@ -135,7 +163,8 @@ class HierarchicalAutoencoder(object):
     def _build_zero_state(self, h):
         # TODO: incorporate batch_size
         c = tf.zeros_like(h)
-        return tf.concat(1, [c, h])
+        # return tf.concat([c, h],1 )
+        return (c,h)
 
     def get_model_dir(self):
         model_name = type(self).__name__ or "Reader"
@@ -176,16 +205,19 @@ class HierarchicalAutoencoder(object):
 
     def train(self, sess, data_path, iterator, iterations=100, save_iters=10):
         model_dir, model_name = self.get_model_dir()
-        merged_sum = tf.merge_all_summaries()
-        writer = tf.train.SummaryWriter("./logs/{}".format(model_dir),
+        merged_sum = tf.summary.merge_all()
+        writer = tf.summary.FileWriter("./logs/{}".format(model_dir),
                                         sess.graph)
 
         sess.run(tf.initialize_all_variables())
         i = 0
+        print (i)
         for x,y in iterator(data_path, self.vocab, self.sent_steps,
                             self.doc_steps, batch_size=self.batch_size):
             outputs = sess.run(self.logits + [self.optim, merged_sum],
                                {self.input_data: x, self.output_data: y})
+            print (i)
+            
             logits      = outputs[:-2]
             summary_str = outputs[-1]
 

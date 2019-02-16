@@ -40,7 +40,7 @@ class HierarchicalAttentionAutoencoder(object):
         self.output_data = tf.placeholder(tf.int32, [self.batch_size,
                                                      self.doc_steps,
                                                      self.sent_steps])
-        with tf.device("/cpu:0"):
+        with tf.device("/gpu:0"):
             self.embedding = tf.get_variable("embedding", [self.vocab_size, self.size])
             self.inputs = []
             for s in range(self.doc_steps):
@@ -140,7 +140,7 @@ class HierarchicalAttentionAutoencoder(object):
         self.cost  = tf.reduce_sum(loss)/self.batch_size
         self.optim = tf.train.GradientDescentOptimizer(0.01).minimize(self.cost,
                 aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
-        tf.scalar_summary("cost", self.cost)
+        tf.summary.scalar("cost", self.cost)
 
         #self.lr   = tf.Variable(0.0, trainable=False)
         #tvars     = tf.trainable_variables()
@@ -191,8 +191,8 @@ class HierarchicalAttentionAutoencoder(object):
 
     def train(self, sess, data_path, iterator, iterations=100, save_iters=10):
         model_dir, model_name = self.get_model_dir()
-        merged_sum = tf.merge_all_summaries()
-        writer = tf.train.SummaryWriter("./logs/{}".format(model_dir),
+        merged_sum = tf.summary.merge_all()
+        writer = tf.summary.FileWriter("./logs/{}".format(model_dir),
                                         sess.graph)
 
         sess.run(tf.initialize_all_variables())
